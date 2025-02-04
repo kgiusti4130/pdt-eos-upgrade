@@ -113,7 +113,7 @@
 ##################################################################
 #                  Transfer the EOS image                        #
 ##################################################################
-    # - name: Transfer EOS image to flash via USB drive.
+    # - name: Transfer EOS image to flash via USB drive. # This is disabled since the image is pushed via SCP below.
     #   arista.eos.eos_command:
     #     commands:
     #       - 'copy usb1:{{ target_file }} flash:'
@@ -122,7 +122,7 @@
 
     - name: Copy EOS image to host via SCP # "aaa authorization exec default local" is required if using local AAA on switch.
       ansible.netcommon.net_put:
-        src: ../{{ target_file }}
+        src: ../eos_images/{{ target_file }}
         protocol: scp
         mode: binary
         dest: /mnt/flash/{{ target_file }}

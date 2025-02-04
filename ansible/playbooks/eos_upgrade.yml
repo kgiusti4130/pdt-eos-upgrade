@@ -121,7 +121,7 @@
 
     - name: Copy EOS image to host via SCP # "aaa authorization exec default local" is required if using local AAA on switch.
       ansible.netcommon.net_put:
-        src: ../{{ target_file }}
+        src: ../eos_images/{{ target_file }}
         protocol: scp
         mode: binary
         dest: /mnt/flash/{{ target_file }}
