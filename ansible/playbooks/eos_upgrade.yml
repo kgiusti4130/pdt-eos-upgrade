@@ -219,5 +219,5 @@
       ansible.builtin.assert:
         that:
           - target_version == ansible_net_version
-        fail_msg: "EOS is NOT on the correct version {{ target_version }}"
+        fail_msg: "EOS is NOT on the correct version of {{ target_version }}"
         success_msg: "EOS is on the correct version of {{ target_version }}"
