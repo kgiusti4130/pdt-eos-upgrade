@@ -1,0 +1,22 @@
+ansible_connection: ansible.netcommon.network_cli
+ansible_become: true
+ansible_become_method: enable
+ansible_httpapi_use_ssl: true
+ansible_httpapi_validate_certs: false
+ansible_user: test
+ansible_ssh_pass: test
+ansible_become_password: test
+
+ntp_server1: pool.ntp.org
+ntp_server2: time.google.com
+
+name_server1: 8.8.8.8
+name_server2: 208.67.222.222
+Auvik_server: 10.216.100.47
+Solarwinds_server: 10.216.150.207
+
+snmp_string: MY_SNMP_STRING
+snmp_location: "Cleveland Office"
+snmp_acl_name: SNMP_Allowed
+
+mgmt_timeout: 30

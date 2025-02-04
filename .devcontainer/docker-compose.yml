@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  pdt-dev03:
+    build: .
+    image: "pdt-dev03:latest"
+    container_name: pdt-dev03
+    # restart: always
+    restart: no
+    command: ['tail', '-f', '/dev/null']
+    network_mode: "host"
+
+    environment:
+      - TZ=America/New_York
+      - DEBIAN_FRONTEND=noninteractive
+#      - ANSIBLE_CONFIG=/workspace/ansible.cfg
+      - LC_ALL=UTF-8
+    volumes:
+      - ../:/workspace

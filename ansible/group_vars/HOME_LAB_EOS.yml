@@ -1,0 +1,14 @@
+ansible_network_os: arista.eos.eos
+
+timezone: "clock timezone America/Detroit"
+
+name_servers:
+- "ip name-server vrf MGMT {{ name_server1 }}"
+- "ip name-server vrf MGMT {{ name_server2 }}"
+
+snmp_servers:
+- "snmp-server community {{ snmp_string }} ro {{ snmp_acl_name }}"
+
+ntp_servers:
+- "ntp server vrf MGMT {{ ntp_server1 }} iburst"
+- "ntp server vrf MGMT {{ ntp_server2 }} prefer iburst"

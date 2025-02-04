@@ -1,0 +1,15 @@
+ansible_network_os: cisco.ios.ios
+
+timezone: "clock timezone EST -5 0"
+summertime: "clock summer-time EDT recurring"
+
+name_servers:
+- "ip name-server {{ name_server1 }}"
+- "ip name-server {{ name_server2 }}"
+
+snmp_servers:
+- "snmp-server community {{ snmp_string }} RO {{ snmp_acl_name }}"
+
+ntp_servers:
+- "ntp server {{ ntp_server1 }}"
+- "ntp server {{ ntp_server2 }}"

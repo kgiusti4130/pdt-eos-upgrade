@@ -1,0 +1,225 @@
+---
+- name: EOS upgrade
+  hosts: LAKEWOOD_ARISTA
+  gather_facts: false
+  vars:
+    target_version: 4.30.6M
+    eos_mem_required: 1057
+    eos_md5: af51678eda3d1e314122b966a886a8e7 # This is the MD5 eos hash before being optimized.
+    eos_md5_720: 741d99c5e1b55eaf2b62342d018a9f35 # This is the MD5 eos hash after a 720XP optimizes the image.
+    eos_md5_7280: 9109b042da1869611f201bf643910837 # This is the MD5 eos hash after a 7280SR optimizes the image.
+    upgrade_folder: upgrades
+    verification_commands:
+      - "show running-config"
+      - "show interfaces status"
+      - "show ip interface brief"
+      - "show mlag interfaces"
+      - "show spanning-tree blockedports"
+      - "show logging 50"
+
+  tasks:
+    - name: Gather facts about device
+      arista.eos.eos_facts:
+        gather_subset:
+          - 'hardware'
+
+    - name: Creating fact to see if EOS needs to be upgraded
+      ansible.builtin.set_fact:
+        perform_upgrade: "{{ target_version != ansible_net_version }}"
+        enough_free_space_yes: "{{ ansible_net_memfree_mb > eos_mem_required }}"
+        target_file: EOS-{{ target_version }}.swi
+
+    - name: We are on the correct version
+      ansible.builtin.debug:
+        msg: "We are already on the correct version of code"
+      when: not perform_upgrade
+
+    - name: We are NOT on the correct version
+      ansible.builtin.debug:
+        msg: "We are not on the correct version of code, we will need to upgrade"
+      when: perform_upgrade
+
+################################################################
+#        Add logic here to perform backups and grab info       #
+################################################################
+
+    - name: Issue commands to grab output from EOS
+      arista.eos.eos_command:
+        commands:
+          "{{ verification_commands }}"
+      register: show_eos_config_before
+      when: perform_upgrade
+
+    - name: Creates directories if does not exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ upgrade_folder }}/{{ inventory_hostname }}"
+      when: perform_upgrade
+
+    - name: Copy output to directory
+      ansible.builtin.copy:
+        content: "{{ show_eos_config_before.stdout | replace('\\n', '\n') }}"
+        dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_before_upgrade.txt"
+        mode: '0755'
+      when: perform_upgrade
+
+################################################################
+#        check if new EOS file already exists on flash         #
+################################################################
+    - name: Check if file exists on flash
+      arista.eos.eos_command:
+        commands:
+          - 'dir flash:'
+      register: show_file
+      when: perform_upgrade
+
+    - name: New facts whether EOS image exists or not
+      ansible.builtin.set_fact:
+        image_exists: "{{ perform_upgrade and show_file.stdout[0] | regex_search(target_file) }}"
+        image_not_exists: "{{ perform_upgrade and not show_file.stdout[0] | regex_search(target_file) }}"
+      when: perform_upgrade
+
+    - name: Does image exist on flash?
+      ansible.builtin.debug:
+        msg: "YES, the EOS version already exists on flash."
+      when: perform_upgrade and image_exists
+
+    - name: Does image exist on flash?
+      ansible.builtin.debug:
+        msg: "NO, the EOS version doesn't exist on flash."
+      when: perform_upgrade and image_not_exists
+
+##################################################################
+# Check if there is enough free space the transfer the EOS image #
+##################################################################
+    - name: Checking free space on flash
+      ansible.builtin.debug:
+        msg: "FREE SPACE {{ ansible_net_memfree_mb }} TOTAL SPACE {{ ansible_net_memtotal_mb }} SPACE REQUIRED {{ eos_mem_required }}"
+      when: perform_upgrade
+
+    - name: Yes, there is enough space
+      ansible.builtin.debug:
+        msg: "Yes, there is enough space"
+      when: perform_upgrade and enough_free_space_yes
+
+    - name: No, there is not enough space
+      ansible.builtin.debug:
+        msg: "No, there is not enough space"
+      when: perform_upgrade and ansible_net_memfree_mb < eos_mem_required
+
+##################################################################
+#                  Transfer the EOS image                        #
+##################################################################
+    # - name: Transfer EOS image to flash via USB drive.
+    #   arista.eos.eos_command:
+    #     commands:
+    #       - 'copy usb1:{{ target_file }} flash:'
+    #     wait_for: result[0] contains 'completed'
+    #   when: perform_upgrade and image_not_exists and enough_free_space_yes
+
+    - name: Copy EOS image to host via SCP # "aaa authorization exec default local" is required if using local AAA on switch.
+      ansible.netcommon.net_put:
+        src: ../{{ target_file }}
+        protocol: scp
+        mode: binary
+        dest: /mnt/flash/{{ target_file }}
+      when: perform_upgrade and image_not_exists and enough_free_space_yes
+
+##################################################################
+#  Verify the MD5 sum is correct after transferring the file     #
+##################################################################
+    - name: Gather MD5 info from transferred file
+      arista.eos.eos_command:
+        commands:
+          - 'verify /md5 flash:{{ target_file }}'
+      register: showmd5
+      when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
+
+    - name: New facts whether MD5 sum is correct or not
+      ansible.builtin.set_fact:
+        md5_is_good: "{{ perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5) or
+                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_720) or
+                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_7280) }}"
+      when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
+
+    - name: Show MD5 hash from new EOS image
+      ansible.builtin.debug:
+        msg: "Here is the MD5 hash for {{ target_file }}: {{ showmd5.stdout[0] }}"
+      when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
+
+    - name: Verify MD5 sum is correct, if skipped it's likely incorrect
+      ansible.builtin.debug:
+        msg: "MD5 {{ showmd5.stdout[0] }} is correct. Upgrade will proceed"
+      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+
+##################################################################
+#                  Start switch upgrade process                  #
+##################################################################
+    - name: Reload the Switch if EOS has been transferred and the MD5 sum is correct.
+      arista.eos.eos_command:
+        commands:
+          - 'write memory'
+          - 'install source flash:{{ target_file }} reload now'
+      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+
+    - name: Wait for switch to return from reboot
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        delay: 180
+        timeout: 1200
+        sleep: 5
+      delegate_to: localhost
+      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+
+    - name: Pause for 5 seconds
+      ansible.builtin.pause:
+        seconds: 5
+      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+
+##################################################################
+#               Upgrade verification process                     #
+##################################################################
+    - name: Issue commands to grab info from EOS post upgrade
+      arista.eos.eos_command:
+        commands:
+          "{{ verification_commands }}"
+      register: show_eos_config_after
+      when: perform_upgrade
+
+    - name: Copy output to directory
+      ansible.builtin.copy:
+        content: "{{ show_eos_config_after.stdout | replace('\\n', '\n') }}"
+        dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_after_upgrade.txt"
+        mode: '0755'
+      when: perform_upgrade
+
+    - name: Find difference before and after upgrades
+      ansible.utils.fact_diff:
+        before: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_before_upgrade.txt"
+        after: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_after_upgrade.txt"
+      register: config_diff
+      when: perform_upgrade
+
+    - name: Copy diff to directory
+      ansible.builtin.copy:
+        content: "{{ config_diff | replace('\\n', '\n') }}"
+        dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_ouput.diff"
+        mode: '0755'
+      when: perform_upgrade
+
+    - name: Gather facts again to make sure on the proper version {{ target_version }}
+      arista.eos.eos_facts:
+        gather_subset:
+          - 'hardware'
+      when: perform_upgrade
+
+    - name: Assert the EOS version is {{ target_version }}
+      ansible.builtin.assert:
+        that:
+          - target_version == ansible_net_version
+        fail_msg: "EOS is NOT on the correct version {{ target_version }}"
+        success_msg: "EOS is on the correct version of {{ target_version }}"
