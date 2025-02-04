@@ -112,7 +112,7 @@
 ##################################################################
 #                  Transfer the EOS image                        #
 ##################################################################
-    # - name: Transfer EOS image to flash via USB drive.
+    # - name: Transfer EOS image to flash via USB drive. # This is disabled since the image is pushed via SCP below.
     #   arista.eos.eos_command:
     #     commands:
     #       - 'copy usb1:{{ target_file }} flash:'
