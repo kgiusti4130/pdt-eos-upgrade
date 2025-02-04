@@ -5,9 +5,9 @@
   vars:
     target_version: 4.30.6M
     eos_mem_required: 1057
-    eos_md5: af51678eda3d1e314122b966a886a8e7 # This is the MD5 eos hash before being optimized.
+    eos_md5: af51678eda3d1e314122b966a886a8e7
     eos_md5_720: 741d99c5e1b55eaf2b62342d018a9f35 # This is the MD5 eos hash after a 720XP optimizes the image.
-    eos_md5_7280: 9109b042da1869611f201bf643910837 # This is the MD5 eos hash after a 7280SR optimizes the image.
+    eos_md5_7280: 9109b042da1869611f201bf643910837 # This is the MD5 eos hash after a 7280R optimizes the image.
     upgrade_folder: upgrades
     verification_commands:
       - "show running-config"
@@ -66,6 +66,35 @@
         mode: '0755'
       when: perform_upgrade
 
+##################################################################
+#                delete old images before upgrade                #
+##################################################################
+    - name: Do you wish to delete old images from the device?
+      tags: flash-cleanup
+      ansible.builtin.pause:
+        prompt: "Press enter to continue or cntrl-c + a to abort"
+
+    - name: Check and register the old image(s) as variable
+      tags: flash-cleanup
+      arista.eos.eos_command:
+        commands: "dir flash: | grep -v '{{ target_file }}' | grep -v '{{ ansible_net_version }}' | grep 'EOS-' | awk '{ print $6 }'"
+      register: delete_image_before
+      ignore_errors: true
+
+    - name: Show images that will be deleted
+      ansible.builtin.debug:
+        var: item
+      with_items: "{{ delete_image_before.stdout_lines }}"
+      tags: flash-cleanup
+      when: delete_image_before.stdout_lines is defined
+
+    - name: Delete an image from the flash directory
+      tags: flash-cleanup
+      arista.eos.eos_command:
+        commands: "delete {{ item }}"
+      with_items: "{{ delete_image_before.stdout_lines }}"
+      when: item != ""
+
 ################################################################
 #        check if new EOS file already exists on flash         #
 ################################################################
@@ -113,7 +142,7 @@
 ##################################################################
 #                  Transfer the EOS image                        #
 ##################################################################
-    # - name: Transfer EOS image to flash via USB drive. # This is disabled since the image is pushed via SCP below.
+    # - name: Transfer EOS image to flash via USB drive.
     #   arista.eos.eos_command:
     #     commands:
     #       - 'copy usb1:{{ target_file }} flash:'
@@ -141,8 +170,7 @@
     - name: New facts whether MD5 sum is correct or not
       ansible.builtin.set_fact:
         md5_is_good: "{{ perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5) or
-                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_720) or
-                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_7280) }}"
+                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_720) }}"
       when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
 
     - name: Show MD5 hash from new EOS image
@@ -223,3 +251,32 @@
           - target_version == ansible_net_version
         fail_msg: "EOS is NOT on the correct version {{ target_version }}"
         success_msg: "EOS is on the correct version of {{ target_version }}"
+
+##################################################################
+#                delete old images once upgraded                #
+##################################################################
+    - name: Do you wish to delete old images from the device?
+      tags: flash-cleanup
+      ansible.builtin.pause:
+        prompt: "Press enter to continue or cntrl-c + a to abort"
+
+    - name: Check and register the old image(s) as variable
+      tags: flash-cleanup
+      arista.eos.eos_command:
+        commands: "dir flash: | grep -v '{{ target_file }}' | grep 'EOS-' | awk '{ print $6 }'"
+      register: delete_image_after
+      ignore_errors: true
+
+    - name: Show images that will be deleted
+      ansible.builtin.debug:
+        var: item
+      with_items: "{{ delete_image_after.stdout_lines }}"
+      tags: flash-cleanup
+      when: delete_image_after.stdout_lines is defined
+
+    - name: Delete an image from the flash directory
+      tags: flash-cleanup
+      arista.eos.eos_command:
+        commands: "delete {{ item }}"
+      with_items: "{{ delete_image_after.stdout_lines }}"
+      when: item != ""
