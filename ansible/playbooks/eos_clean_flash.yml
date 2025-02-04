@@ -1,0 +1,34 @@
+---
+- name: EOS upgrade
+  hosts: LAKEWOOD_ARISTA
+  gather_facts: false
+  tasks:
+    - name: Gather facts about device
+      arista.eos.eos_facts:
+        gather_subset:
+          - 'hardware'
+
+##################################################################
+#                delete old images before upgrade                #
+##################################################################
+    - name: Do you wish to delete old images from the device?
+      ansible.builtin.pause:
+        prompt: "Press enter to continue or cntrl-c + a to abort"
+
+    - name: Check and register the old image(s) as variable
+      arista.eos.eos_command:
+        commands: "dir flash: | grep -v '{{ ansible_net_version }}' | grep 'EOS-' | awk '{ print $6 }'"
+      register: delete_image
+      ignore_errors: true
+
+    - name: Show images that will be deleted
+      ansible.builtin.debug:
+        var: item
+      with_items: "{{ delete_image.stdout_lines }}"
+      when: delete_image.stdout_lines is defined
+
+    - name: Delete an image from the flash directory
+      arista.eos.eos_command:
+        commands: "delete {{ item }}"
+      with_items: "{{ delete_image.stdout_lines }}"
+      when: item != ""
