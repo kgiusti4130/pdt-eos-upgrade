@@ -93,6 +93,33 @@
       when: perform_upgrade and image_not_exists
 
 ##################################################################
+#                delete old images before upgrade                #
+##################################################################
+    - name: Do you wish to delete old images from the device?
+      ansible.builtin.pause:
+        prompt: "Press enter to continue or cntrl-c + a to abort"
+      when: perform_upgrade
+
+    - name: Check and register the old image(s) as variable
+      arista.eos.eos_command:
+        commands: "bash ls /mnt/flash/ | grep -v '{{ ansible_net_version }}' | grep -v '{{ target_file }}' | grep 'EOS-' | cat"
+      register: delete_image
+      ignore_errors: true
+      when: perform_upgrade
+
+    - name: Show images that will be deleted
+      ansible.builtin.debug:
+        var: item
+      with_items: "{{ delete_image.stdout_lines }}"
+      when: perform_upgrade and delete_image.stdout_lines is defined
+
+    - name: Delete old image(s) from flash other than {{ ansible_net_version }}
+      arista.eos.eos_command:
+        commands: "delete {{ item }}"
+      with_items: "{{ delete_image.stdout_lines }}"
+      when: perform_upgrade and item != ""
+
+##################################################################
 # Check if there is enough free space the transfer the EOS image #
 ##################################################################
     - name: Checking free space on flash
@@ -141,7 +168,8 @@
     - name: New facts whether MD5 sum is correct or not
       ansible.builtin.set_fact:
         md5_is_good: "{{ perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5) or
-                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_720) }}"
+                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_720) or
+                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_7280) }}"
       when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
 
     - name: Show MD5 hash from new EOS image
