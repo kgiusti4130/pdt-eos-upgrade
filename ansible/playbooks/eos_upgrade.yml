@@ -7,7 +7,7 @@
     eos_mem_required: 1057
     eos_md5: c90a8c8e0012811fca2777f7c5fb8643
     eos_md5_720: dfbb15fe38a59db83cd0bf945ede9b2e # This is the MD5 eos hash after a 720XP optimizes the image.
-    eos_md5_7280: 8924997ec9bbe963750ebbf7588c2c38
+    eos_md5_7280: 8924997ec9bbe963750ebbf7588c2c38 # This is the MD5 eos hash after a 7280SR optimizes the image.
     upgrade_folder: upgrades
     verification_commands:
       - "show running-config"
@@ -15,7 +15,6 @@
       - "show ip interface brief"
       - "show mlag interfaces"
       - "show spanning-tree blockedports"
-      - "show logging 50"
 
   tasks:
     - name: Gather facts about device
@@ -23,32 +22,47 @@
         gather_subset:
           - 'hardware'
 
-    - name: Creating fact to see if EOS needs to be upgraded
+    - name: Gather mlag information
+      arista.eos.eos_command:
+        commands:
+          - show mlag detail | json
+      register: mlag_info
+
+    - name: Creating facts regarding MLAG status and whether hostname is odd or even
       ansible.builtin.set_fact:
-        perform_upgrade: "{{ target_version != ansible_net_version }}"
+        mlag_standalone: "{{ 'disabled' == mlag_info.stdout[0].state }}"
+        mlag_good: "{{ mlag_info.stdout[0].negStatus is defined and 'connected' == mlag_info.stdout[0].negStatus and 'active' == mlag_info.stdout[0].state }}"
+        hostname_odd: "{{ inventory_hostname | regex_replace('[A-Za-z]', '') | int is not divisibleby 2 }}"
+        hostname_even: "{{ inventory_hostname | regex_replace('[A-Za-z]', '') | int is divisibleby 2 }}"
         enough_free_space_yes: "{{ ansible_net_memfree_mb > eos_mem_required }}"
         target_file: EOS-{{ target_version }}.swi
 
-    - name: We are on the correct version
-      ansible.builtin.debug:
-        msg: "We are already on the correct version of code"
-      when: not perform_upgrade
+    - name: Creating facts regarding MLAG
+      ansible.builtin.set_fact:
+        perform_upgrade_standalone: "{{ target_version != ansible_net_version and mlag_standalone }}"
+
+    - name: Create odd MLAG fact & tag
+      ansible.builtin.set_fact:
+        perform_upgrade_mlag_odd: "{{ target_version != ansible_net_version and mlag_good and hostname_odd }}"
+
+    - name: Create even MLAG fact & tag
+      ansible.builtin.set_fact:
+        perform_upgrade_mlag_even: "{{ target_version != ansible_net_version and mlag_good and hostname_even }}"
 
     - name: We are NOT on the correct version
       ansible.builtin.debug:
         msg: "We are not on the correct version of code, we will need to upgrade"
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
 ################################################################
 #        Add logic here to perform backups and grab info       #
 ################################################################
-
     - name: Issue commands to grab output from EOS
       arista.eos.eos_command:
         commands:
           "{{ verification_commands }}"
       register: show_eos_config_before
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
     - name: Creates directories if does not exist
       ansible.builtin.file:
@@ -57,14 +71,14 @@
         mode: '0755'
       loop:
         - "{{ upgrade_folder }}/{{ inventory_hostname }}"
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
     - name: Copy output to directory
       ansible.builtin.copy:
         content: "{{ show_eos_config_before.stdout | replace('\\n', '\n') }}"
         dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_before_upgrade.txt"
         mode: '0755'
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
 ################################################################
 #        check if new EOS file already exists on flash         #
@@ -73,51 +87,106 @@
       arista.eos.eos_command:
         commands:
           - 'dir flash:'
-      register: show_file
-      when: perform_upgrade
+      register: show_file_standalone
+      when: perform_upgrade_standalone
+
+    - name: Check if file exists on flash
+      arista.eos.eos_command:
+        commands:
+          - 'dir flash:'
+      register: show_file_odd
+      when: perform_upgrade_mlag_odd
+      tags: mlag_odd
+
+    - name: Check if file exists on flash
+      arista.eos.eos_command:
+        commands:
+          - 'dir flash:'
+      register: show_file_even
+      when: perform_upgrade_mlag_even
+      tags: mlag_even
 
     - name: New facts whether EOS image exists or not
       ansible.builtin.set_fact:
-        image_exists: "{{ perform_upgrade and show_file.stdout[0] | regex_search(target_file) }}"
-        image_not_exists: "{{ perform_upgrade and not show_file.stdout[0] | regex_search(target_file) }}"
-      when: perform_upgrade
+        image_exists_standalone: "{{ perform_upgrade_standalone and show_file_standalone.stdout[0] | regex_search(target_file) }}"
+        image_not_exists_standalone: "{{ perform_upgrade_standalone and not show_file_standalone.stdout[0] | regex_search(target_file) }}"
+      when: perform_upgrade_standalone
 
-    - name: Does image exist on flash?
-      ansible.builtin.debug:
-        msg: "YES, the EOS version already exists on flash."
-      when: perform_upgrade and image_exists
+    - name: New facts whether EOS image exists or not
+      ansible.builtin.set_fact:
+        image_exists_mlag_odd: "{{ perform_upgrade_mlag_odd and show_file_odd.stdout[0] | regex_search(target_file) }}"
+        image_not_exists_mlag_odd: "{{ perform_upgrade_mlag_odd and not show_file_odd.stdout[0] | regex_search(target_file) }}"
+      when: perform_upgrade_mlag_odd
+      tags: mlag_odd
 
-    - name: Does image exist on flash?
-      ansible.builtin.debug:
-        msg: "NO, the EOS version doesn't exist on flash."
-      when: perform_upgrade and image_not_exists
+    - name: New facts whether EOS image exists or not
+      ansible.builtin.set_fact:
+        image_exists_mlag_even: "{{ perform_upgrade_mlag_even and show_file_even.stdout[0] | regex_search(target_file) }}"
+        image_not_exists_mlag_even: "{{ perform_upgrade_mlag_even and not show_file_even.stdout[0] | regex_search(target_file) }}"
+      when: perform_upgrade_mlag_even
+      tags: mlag_even
 
 ##################################################################
 #                delete old images before upgrade                #
 ##################################################################
-    - name: Do you wish to delete old images from the device?
+    - name: Do you wish to delete old images from non-MLAG devices?
       ansible.builtin.pause:
         prompt: "Press enter to continue or cntrl-c + a to abort"
-      when: perform_upgrade
+      when: perform_upgrade_standalone
+
+    - name: Do you wish to delete old images from MLAG odd devices ?
+      ansible.builtin.pause:
+        prompt: "Press enter to continue or cntrl-c + a to abort"
+      when: perform_upgrade_mlag_odd
+
+    - name: Do you wish to delete old images from MLAG even devices?
+      ansible.builtin.pause:
+        prompt: "Press enter to continue or cntrl-c + a to abort"
+      when: perform_upgrade_mlag_even
 
     - name: Check and register the old image(s) as variable
       arista.eos.eos_command:
         commands: "bash ls /mnt/flash/ | grep -v '{{ ansible_net_version }}' | grep -v '{{ target_file }}' | grep 'EOS-' | cat"
-      register: delete_image
+      register: delete_image_standalone
       ignore_errors: true
-      when: perform_upgrade
+      when: perform_upgrade_standalone
 
-    - name: Show images that will be deleted
-      ansible.builtin.debug:
-        var: item
-      with_items: "{{ delete_image.stdout_lines }}"
-      when: perform_upgrade and delete_image.stdout_lines is defined
+    - name: Check and register the old image(s) as variable
+      arista.eos.eos_command:
+        commands: "bash ls /mnt/flash/ | grep -v '{{ ansible_net_version }}' | grep -v '{{ target_file }}' | grep 'EOS-' | cat"
+      register: delete_image_odd
+      ignore_errors: true
+      when: perform_upgrade_mlag_odd
+
+    - name: Check and register the old image(s) as variable
+      arista.eos.eos_command:
+        commands: "bash ls /mnt/flash/ | grep -v '{{ ansible_net_version }}' | grep -v '{{ target_file }}' | grep 'EOS-' | cat"
+      register: delete_image_even
+      ignore_errors: true
+      when: perform_upgrade_mlag_even
+
+##################################################################
+#                    Delete old images                           #
+##################################################################
+    - name: Delete old image(s) from flash other than {{ ansible_net_version }}
+      arista.eos.eos_command:
+        commands: "delete {{ item }}"
+      with_items: "{{ delete_image_standalone.stdout_lines }}"
+      when: perform_upgrade_standalone and item != ""
 
     - name: Delete old image(s) from flash other than {{ ansible_net_version }}
       arista.eos.eos_command:
         commands: "delete {{ item }}"
-      with_items: "{{ delete_image.stdout_lines }}"
-      when: perform_upgrade and item != ""
+      with_items: "{{ delete_image_odd.stdout_lines }}"
+      when: perform_upgrade_mlag_odd and item != ""
+      tags: mlag_odd
+
+    - name: Delete old image(s) from flash other than {{ ansible_net_version }}
+      arista.eos.eos_command:
+        commands: "delete {{ item }}"
+      with_items: "{{ delete_image_even.stdout_lines }}"
+      when: perform_upgrade_mlag_even and item != ""
+      tags: mlag_even
 
 ##################################################################
 # Check if there is enough free space the transfer the EOS image #
@@ -125,27 +194,49 @@
     - name: Checking free space on flash
       ansible.builtin.debug:
         msg: "FREE SPACE {{ ansible_net_memfree_mb }} TOTAL SPACE {{ ansible_net_memtotal_mb }} SPACE REQUIRED {{ eos_mem_required }}"
-      when: perform_upgrade
+      when: "perform_upgrade_standalone or
+             perform_upgrade_mlag_odd or
+             perform_upgrade_mlag_even"
 
     - name: Yes, there is enough space
       ansible.builtin.debug:
         msg: "Yes, there is enough space"
-      when: perform_upgrade and enough_free_space_yes
+      when: "perform_upgrade_standalone and enough_free_space_yes or
+             perform_upgrade_mlag_odd and enough_free_space_yes or
+             perform_upgrade_mlag_even and enough_free_space_yes"
 
     - name: No, there is not enough space
       ansible.builtin.debug:
         msg: "No, there is not enough space"
-      when: perform_upgrade and ansible_net_memfree_mb < eos_mem_required
+      when: "perform_upgrade_standalone and ansible_net_memfree_mb < eos_mem_required or
+             perform_upgrade_mlag_odd and ansible_net_memfree_mb < eos_mem_required or
+             perform_upgrade_mlag_even and ansible_net_memfree_mb < eos_mem_required"
 
 ##################################################################
 #                  Transfer the EOS image                        #
 ##################################################################
-    # - name: Transfer EOS image to flash via USB drive.
+    # - name: Transfer EOS image to flash via USB drive on non-MLAG switches
     #   arista.eos.eos_command:
     #     commands:
     #       - 'copy usb1:{{ target_file }} flash:'
     #     wait_for: result[0] contains 'completed'
-    #   when: perform_upgrade and image_not_exists and enough_free_space_yes
+    #   when: "perform_upgrade_standalone and image_not_exists and enough_free_space_yes"
+
+    # - name: Transfer EOS image to flash via USB drive on MLAG odd switches
+    #   arista.eos.eos_command:
+    #     commands:
+    #       - 'copy usb1:{{ target_file }} flash:'
+    #     wait_for: result[0] contains 'completed'
+    #   when: "perform_upgrade_mlag_odd and image_not_exists and enough_free_space_yes"
+    #   tags: mlag_odd
+
+    # - name: Transfer EOS image to flash via USB drive on MLAG even switches
+    #   arista.eos.eos_command:
+    #     commands:
+    #       - 'copy usb1:{{ target_file }} flash:'
+    #     wait_for: result[0] contains 'completed'
+    #   when: "perform_upgrade_mlag_even and image_not_exists and enough_free_space_yes"
+    #   tags: mlag_even
 
     - name: Copy EOS image to host via SCP # "aaa authorization exec default local" is required if using local AAA on switch.
       ansible.netcommon.net_put:
@@ -153,7 +244,25 @@
         protocol: scp
         mode: binary
         dest: /mnt/flash/{{ target_file }}
-      when: perform_upgrade and image_not_exists and enough_free_space_yes
+      when: "perform_upgrade_standalone and image_not_exists_standalone and enough_free_space_yes"
+
+    - name: Copy EOS image to host via SCP # "aaa authorization exec default local" is required if using local AAA on switch.
+      ansible.netcommon.net_put:
+        src: ../eos_images/{{ target_file }}
+        protocol: scp
+        mode: binary
+        dest: /mnt/flash/{{ target_file }}
+      when: "perform_upgrade_mlag_odd and image_not_exists_mlag_odd and enough_free_space_yes"
+      tags: mlag_odd
+
+    - name: Copy EOS image to host via SCP # "aaa authorization exec default local" is required if using local AAA on switch.
+      ansible.netcommon.net_put:
+        src: ../eos_images/{{ target_file }}
+        protocol: scp
+        mode: binary
+        dest: /mnt/flash/{{ target_file }}
+      when: "perform_upgrade_mlag_even and image_not_exists_mlag_even and enough_free_space_yes"
+      tags: mlag_even
 
 ##################################################################
 #  Verify the MD5 sum is correct after transferring the file     #
@@ -162,25 +271,93 @@
       arista.eos.eos_command:
         commands:
           - 'verify /md5 flash:{{ target_file }}'
-      register: showmd5
-      when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
+      register: showmd5_standalone
+      when: "perform_upgrade_standalone and image_exists_standalone or
+             perform_upgrade_standalone and enough_free_space_yes"
+
+    - name: Gather MD5 info from transferred file
+      arista.eos.eos_command:
+        commands:
+          - 'verify /md5 flash:{{ target_file }}'
+      register: showmd5_mlag_odd
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes"
+      tags: mlag_odd
+
+    - name: Gather MD5 info from transferred file
+      arista.eos.eos_command:
+        commands:
+          - 'verify /md5 flash:{{ target_file }}'
+      register: showmd5_mlag_even
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes"
+      tags: mlag_even
 
     - name: New facts whether MD5 sum is correct or not
       ansible.builtin.set_fact:
-        md5_is_good: "{{ perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5) or
-                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_720) or
-                         perform_upgrade and showmd5.stdout[0] | regex_search(eos_md5_7280) }}"
-      when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
+        md5_is_good_standalone: "{{ perform_upgrade_standalone and showmd5_standalone.stdout[0] | regex_search(eos_md5) or
+                         perform_upgrade_standalone and showmd5_standalone.stdout[0] | regex_search(eos_md5_720) or
+                         perform_upgrade_standalone and showmd5_standalone.stdout[0] | regex_search(eos_md5_7280) }}"
+      when: "perform_upgrade_standalone and image_exists_standalone or
+             perform_upgrade_standalone and enough_free_space_yes"
+
+    - name: New facts whether MD5 sum is correct or not
+      ansible.builtin.set_fact:
+        md5_is_good_mlag_odd: "{{ perform_upgrade_mlag_odd and showmd5_mlag_odd.stdout[0] | regex_search(eos_md5) or
+                         perform_upgrade_mlag_odd and showmd5_mlag_odd.stdout[0] | regex_search(eos_md5_720) or
+                         perform_upgrade_mlag_odd and showmd5_mlag_odd.stdout[0] | regex_search(eos_md5_7280) }}"
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes"
+      tags: mlag_odd
+
+    - name: New facts whether MD5 sum is correct or not
+      ansible.builtin.set_fact:
+        md5_is_good_mlag_even: "{{ perform_upgrade_mlag_even and showmd5_mlag_even.stdout[0] | regex_search(eos_md5) or
+                         perform_upgrade_mlag_even and showmd5_mlag_even.stdout[0] | regex_search(eos_md5_720) or
+                         perform_upgrade_mlag_even and showmd5_mlag_even.stdout[0] | regex_search(eos_md5_7280) }}"
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes"
+      tags: mlag_even
 
     - name: Show MD5 hash from new EOS image
       ansible.builtin.debug:
-        msg: "Here is the MD5 hash for {{ target_file }}: {{ showmd5.stdout[0] }}"
-      when: perform_upgrade and image_exists or perform_upgrade and enough_free_space_yes
+        msg: "Here is the MD5 hash for {{ target_file }}: {{ showmd5_standalone.stdout[0] }}"
+      when: "perform_upgrade_standalone and image_exists_standalone or
+             perform_upgrade_standalone and enough_free_space_yes"
 
-    - name: Verify MD5 sum is correct, if skipped it's likely incorrect
+    - name: Show MD5 hash from new EOS image
       ansible.builtin.debug:
-        msg: "MD5 {{ showmd5.stdout[0] }} is correct. Upgrade will proceed"
-      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+        msg: "Here is the MD5 hash for {{ target_file }}: {{ showmd5_mlag_odd.stdout[0] }}"
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes"
+      tags: mlag_odd
+
+    - name: Show MD5 hash from new EOS image
+      ansible.builtin.debug:
+        msg: "Here is the MD5 hash for {{ target_file }}: {{ showmd5_mlag_even.stdout[0] }}"
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes"
+      tags: mlag_even
+
+    - name: Verify MD5 sum is correct, if skipped it's likely incorrect standalone
+      ansible.builtin.debug:
+        msg: "MD5 {{ showmd5_standalone.stdout[0] }} is correct. Upgrade will proceed"
+      when: "perform_upgrade_standalone and image_exists_standalone and md5_is_good_standalone or
+             perform_upgrade_standalone and enough_free_space_yes and md5_is_good_standalone"
+
+    - name: Verify MD5 sum is correct, if skipped it's likely incorrect mlag odd
+      ansible.builtin.debug:
+        msg: "MD5 {{ showmd5_mlag_odd.stdout[0] }} is correct. Upgrade will proceed"
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd and md5_is_good_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes and md5_is_good_mlag_odd"
+      tags: mlag_odd
+
+    - name: Verify MD5 sum is correct, if skipped it's likely incorrect mlag even
+      ansible.builtin.debug:
+        msg: "MD5 {{ showmd5_mlag_even.stdout[0] }} is correct. Upgrade will proceed"
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even and md5_is_good_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes and md5_is_good_mlag_even"
+      tags: mlag_even
 
 ##################################################################
 #                  Start switch upgrade process                  #
@@ -190,22 +367,81 @@
         commands:
           - 'write memory'
           - 'install source flash:{{ target_file }} reload now'
-      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+      when: "perform_upgrade_standalone and image_exists_standalone and md5_is_good_standalone or
+             perform_upgrade_standalone and enough_free_space_yes and md5_is_good_standalone"
 
-    - name: Wait for switch to return from reboot
+    - name: Reload the Switch if EOS has been transferred and the MD5 sum is correct.
+      arista.eos.eos_command:
+        commands:
+          - 'write memory'
+          - 'install source flash:{{ target_file }} reload now'
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd and md5_is_good_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes and md5_is_good_mlag_odd"
+      tags: mlag_odd
+
+    - name: Reload the Switch if EOS has been transferred and the MD5 sum is correct.
+      arista.eos.eos_command:
+        commands:
+          - 'write memory'
+          - 'install source flash:{{ target_file }} reload now'
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even and md5_is_good_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes and md5_is_good_mlag_even"
+      tags: mlag_even
+
+    - name: Wait for switch to return from reboot on non-MLAG switches
       ansible.builtin.wait_for:
         host: "{{ ansible_host }}"
         port: 22
-        delay: 180
+        delay: 18
         timeout: 1200
         sleep: 5
       delegate_to: localhost
-      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+      when: "perform_upgrade_standalone and image_exists_standalone and md5_is_good_standalone or
+             perform_upgrade_standalone and enough_free_space_yes and md5_is_good_standalone"
 
-    - name: Pause for 5 seconds
+    - name: Wait for switch to return from reboot MLAG odd switches
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        delay: 18
+        timeout: 1200
+        sleep: 5
+      delegate_to: localhost
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd and md5_is_good_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes and md5_is_good_mlag_odd"
+      tags: mlag_odd
+
+    - name: Wait for switch to return from reboot MLAG even switches
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        delay: 18
+        timeout: 1200
+        sleep: 5
+      delegate_to: localhost
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even and md5_is_good_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes and md5_is_good_mlag_even"
+      tags: mlag_even
+
+    - name: Pause for 5 seconds on non-MLAG switches
       ansible.builtin.pause:
         seconds: 5
-      when: perform_upgrade and image_exists and md5_is_good or perform_upgrade and enough_free_space_yes and md5_is_good
+      when: "perform_upgrade_standalone and image_exists_standalone and md5_is_good_standalone or
+             perform_upgrade_standalone and enough_free_space_yes and md5_is_good_standalone"
+
+    - name: Pause for 5 seconds MLAG odd switches
+      ansible.builtin.pause:
+        seconds: 5
+      when: "perform_upgrade_mlag_odd and image_exists_mlag_odd and md5_is_good_mlag_odd or
+             perform_upgrade_mlag_odd and enough_free_space_yes and md5_is_good_mlag_odd"
+      tags: mlag_odd
+
+    - name: Pause for 5 seconds on MLAG even switches
+      ansible.builtin.pause:
+        seconds: 5
+      when: "perform_upgrade_mlag_even and image_exists_mlag_even and md5_is_good_mlag_even or
+             perform_upgrade_mlag_even and enough_free_space_yes and md5_is_good_mlag_even"
+      tags: mlag_even
 
 ##################################################################
 #               Upgrade verification process                     #
@@ -214,39 +450,84 @@
       arista.eos.eos_command:
         commands:
           "{{ verification_commands }}"
-      register: show_eos_config_after
-      when: perform_upgrade
+      register: show_eos_config_after_standalone
+      when: perform_upgrade_standalone
 
-    - name: Copy output to directory
+    - name: Issue commands to grab info from EOS post upgrade
+      arista.eos.eos_command:
+        commands:
+          "{{ verification_commands }}"
+      register: show_eos_config_after_mlag_odd
+      when: perform_upgrade_mlag_odd
+
+    - name: Issue commands to grab info from EOS post upgrade
+      arista.eos.eos_command:
+        commands:
+          "{{ verification_commands }}"
+      register: show_eos_config_after_mlag_even
+      when: perform_upgrade_mlag_even
+
+    - name: Copy output to directory on non-MLAG switches
       ansible.builtin.copy:
-        content: "{{ show_eos_config_after.stdout | replace('\\n', '\n') }}"
+        content: "{{ show_eos_config_after_standalone.stdout | replace('\\n', '\n') }}"
         dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_after_upgrade.txt"
         mode: '0755'
-      when: perform_upgrade
+      when: perform_upgrade_standalone
+
+    - name: Copy output to directory MLAG odd switches
+      ansible.builtin.copy:
+        content: "{{ show_eos_config_after_mlag_odd.stdout | replace('\\n', '\n') }}"
+        dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_after_upgrade.txt"
+        mode: '0755'
+      when: perform_upgrade_mlag_odd
+
+    - name: Copy output to directory MLAG even switches
+      ansible.builtin.copy:
+        content: "{{ show_eos_config_after_mlag_even.stdout | replace('\\n', '\n') }}"
+        dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_after_upgrade.txt"
+        mode: '0755'
+      when: perform_upgrade_mlag_even
 
     - name: Find difference before and after upgrades
       ansible.utils.fact_diff:
         before: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_before_upgrade.txt"
         after: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_after_upgrade.txt"
       register: config_diff
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
     - name: Copy diff to directory
       ansible.builtin.copy:
         content: "{{ config_diff | replace('\\n', '\n') }}"
         dest: "{{ upgrade_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}_ouput.diff"
         mode: '0755'
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
     - name: Gather facts again to make sure on the proper version {{ target_version }}
       arista.eos.eos_facts:
         gather_subset:
           - 'hardware'
-      when: perform_upgrade
+      when: perform_upgrade_standalone or perform_upgrade_mlag_odd or perform_upgrade_mlag_even
 
-    - name: Assert the EOS version is {{ target_version }}
+    - name: Assert the EOS version for non-MLAG switches is {{ target_version }}
       ansible.builtin.assert:
         that:
           - target_version == ansible_net_version
         fail_msg: "EOS is NOT on the correct version of {{ target_version }}"
         success_msg: "EOS is on the correct version of {{ target_version }}"
+      when: perform_upgrade_standalone
+
+    - name: Assert the EOS version for MLAG odd switches is {{ target_version }}
+      ansible.builtin.assert:
+        that:
+          - target_version == ansible_net_version
+        fail_msg: "EOS is NOT on the correct version of {{ target_version }}"
+        success_msg: "EOS is on the correct version of {{ target_version }}"
+      when: perform_upgrade_mlag_odd
+
+    - name: Assert the EOS version for MLAG even switches is {{ target_version }}
+      ansible.builtin.assert:
+        that:
+          - target_version == ansible_net_version
+        fail_msg: "EOS is NOT on the correct version of {{ target_version }}"
+        success_msg: "EOS is on the correct version of {{ target_version }}"
+      when: perform_upgrade_mlag_even

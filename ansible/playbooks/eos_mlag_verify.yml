@@ -1,0 +1,50 @@
+---
+
+- name: MLAG validation
+  hosts: LAKEWOOD_ARISTA
+  gather_facts: false
+
+  tasks:
+    - name: Gather mlag info
+      arista.eos.eos_command:
+        commands:
+          - "show mlag detail | json"
+      register: mlag_info
+
+    - name: Creating facts regarding MLAG status and whether hostname is odd or even
+      ansible.builtin.set_fact:
+        mlag_standalone: "{{ 'disabled' == mlag_info.stdout[0].state }}"
+        mlag_good: "{{ mlag_info.stdout[0].negStatus is defined and 'connected' == mlag_info.stdout[0].negStatus and
+                       'active' == mlag_info.stdout[0].state and 'up' == mlag_info.stdout[0].peerLinkStatus and 'up' == mlag_info.stdout[0].localIntfStatus }}"
+        mlag_not_errordisabled: "{{ false == mlag_info.stdout[0].portsErrdisabled }}"
+        mlag_active_partial_good: "{{ mlag_info.stdout[0].mlagPorts['Active-partial'] == 0 }}"
+
+    - name: Switches are standalone and not MLAGed
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is standalone"
+      when: mlag_standalone
+
+    - name: Print if any MLAG active partial ports
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} has {{ mlag_info.stdout[0].mlagPorts['Active-partial'] }} Active-partial ports"
+      when: not mlag_standalone and not mlag_active_partial_good
+
+    - name: Switches are in MLAG pair and healthy
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is MLAGed and healthy"
+      when: 'mlag_not_errordisabled and mlag_good and mlag_active_partial_good'
+
+    - name: Switches are in MLAG pair and NOT healthy
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is MLAGed and NOT healthy"
+      when: 'not mlag_standalone and not mlag_good or not mlag_standalone and not mlag_not_errordisabled or
+             not mlag_standalone and not mlag_active_partial_good'
+
+    - name: Assert that MLAG is good
+      ansible.builtin.assert:
+        that:
+          - mlag_not_errordisabled and mlag_good and mlag_not_errordisabled and mlag_active_partial_good
+        fail_msg: "MLAG is bad"
+        success_msg: "MLAG is good"
+      when: not mlag_standalone
